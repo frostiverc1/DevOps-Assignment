@@ -212,10 +212,10 @@ Set these in your fork's Settings → Secrets and variables → Actions:
 |---|---|
 | `AWS_ACCOUNT_ID` | Your 12-digit AWS account ID |
 | `AWS_ROLE_ARN_DEV` | Output of `terraform output github_actions_role_arn` (AWS) |
-| `GITHUB_REPO` | `yourorg/DevOps-Assignment` |
+| `GH_REPO` | `yourorg/DevOps-Assignment` |
 | `TF_STATE_BUCKET_AWS` | S3 bucket name from bootstrap output |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER_DEV` | Output of `terraform output workload_identity_provider` (GCP) |
-| `GCP_SERVICE_ACCOUNT` | Output of `terraform output service_account_email` (GCP) |
+| `GCP_SERVICE_ACCOUNT_DEV` | Output of `terraform output service_account_email` (GCP) |
 | `GCP_PROJECT_ID_DEV` | GCP project ID for dev |
 | `GCP_PROJECT_ID_STAGING` | GCP project ID for staging |
 | `GCP_PROJECT_ID_PROD` | GCP project ID for prod |

@@ -56,7 +56,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Format Check
@@ -69,7 +69,7 @@ jobs:
         run: |
           terraform init -backend-config=backend.tf \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="github_repo=${{ secrets.GITHUB_REPO }}" \
+            -var="github_repo=${{ secrets.GH_REPO }}" \
             -var="state_bucket_name=${{ secrets.TF_STATE_BUCKET_AWS }}"
 
       - name: Terraform Validate
@@ -81,7 +81,7 @@ jobs:
         run: |
           terraform plan -no-color \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="github_repo=${{ secrets.GITHUB_REPO }}" \
+            -var="github_repo=${{ secrets.GH_REPO }}" \
             -var="state_bucket_name=${{ secrets.TF_STATE_BUCKET_AWS }}" \
             -out=tfplan 2>&1 | tee /tmp/plan.txt
         continue-on-error: true
@@ -121,7 +121,7 @@ jobs:
         run: |
           terraform apply -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="github_repo=${{ secrets.GITHUB_REPO }}" \
+            -var="github_repo=${{ secrets.GH_REPO }}" \
             -var="state_bucket_name=${{ secrets.TF_STATE_BUCKET_AWS }}"
 
       - name: Terraform Destroy
@@ -129,5 +129,5 @@ jobs:
         run: |
           terraform destroy -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="github_repo=${{ secrets.GITHUB_REPO }}" \
+            -var="github_repo=${{ secrets.GH_REPO }}" \
             -var="state_bucket_name=${{ secrets.TF_STATE_BUCKET_AWS }}"
