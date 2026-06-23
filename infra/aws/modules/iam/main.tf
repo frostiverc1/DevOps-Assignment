@@ -155,3 +155,11 @@ resource "aws_iam_role_policy" "tf_state" {
     ]
   })
 }
+
+# Attach AdministratorAccess policy to the GitHub Actions deploy role
+# Since the role's trust policy limits access only to OIDC requests from your repo,
+# this is secure and standard practice for CI/CD runners.
+resource "aws_iam_role_policy_attachment" "admin" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
