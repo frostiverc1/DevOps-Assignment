@@ -42,10 +42,21 @@ jobs:
       # ── 2. Configure AWS credentials via OIDC ────────────────────────────────
       # No static access keys. GitHub exchanges the OIDC token for temporary
       # AWS credentials using the IAM role created by infra/aws/modules/iam/.
+      - name: Resolve AWS Role ARN for Environment
+        id: resolve-role
+        run: |
+          ROLE_ARN=""
+          case "${{ env.TARGET_ENV }}" in
+            dev)     ROLE_ARN="${{ secrets.AWS_ROLE_ARN_DEV }}" ;;
+            staging) ROLE_ARN="${{ secrets.AWS_ROLE_ARN_STAGING || secrets.AWS_ROLE_ARN_DEV }}" ;;
+            prod)    ROLE_ARN="${{ secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}" ;;
+          esac
+          echo "role-arn=${ROLE_ARN}" >> $GITHUB_OUTPUT
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-to-assume: ${{ steps.resolve-role.outputs.role-arn }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-${{ github.run_id }}
 
