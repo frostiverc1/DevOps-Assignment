@@ -9,7 +9,7 @@
 #
 # Usage:
 #   cd infra/gcp/environments/dev
-#   terraform init -backend-config=backend.tf
+#   terraform init -backend-config=backend.hcl
 #   terraform apply -var-file=terraform.tfvars
 # ─────────────────────────────────────────────────────────────────────────────
 

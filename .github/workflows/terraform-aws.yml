@@ -78,7 +78,7 @@ jobs:
       - name: Terraform Init
         id: init
         run: |
-          terraform init -backend-config=backend.tf \
+          terraform init -backend-config=backend.hcl \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -var="github_repo=${{ secrets.GH_REPO }}" \
             -var="state_bucket_name=${{ secrets.TF_STATE_BUCKET_AWS }}"

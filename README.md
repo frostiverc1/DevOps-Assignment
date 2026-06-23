@@ -155,7 +155,7 @@ state_bucket_name = "devops-assignment-tf-state-123456789012"
 #### Step 3: Apply dev environment
 ```bash
 cd infra/aws/environments/dev
-terraform init -backend-config=backend.tf
+terraform init -backend-config=backend.hcl
 terraform apply -var-file=terraform.tfvars
 ```
 
@@ -184,7 +184,7 @@ github_repo = "yourorg/DevOps-Assignment"
 #### Step 3: Apply dev environment
 ```bash
 cd infra/gcp/environments/dev
-terraform init -backend-config=backend.tf
+terraform init -backend-config=backend.hcl
 terraform apply -var-file=terraform.tfvars
 ```
 

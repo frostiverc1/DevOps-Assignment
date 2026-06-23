@@ -2,7 +2,7 @@
 # AWS Dev Environment
 # Usage:
 #   cd infra/aws/environments/dev
-#   terraform init -backend-config=backend.tf
+#   terraform init -backend-config=backend.hcl
 #   terraform apply -var-file=terraform.tfvars
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -14,7 +14,7 @@ terraform {
       version = "~> 5.0"
     }
   }
-  backend "s3" {} # Configured via backend.tf passed to -backend-config
+  backend "s3" {} # Configured via backend.hcl passed to -backend-config
 }
 
 provider "aws" {

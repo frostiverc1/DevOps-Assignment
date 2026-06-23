@@ -1,5 +1,5 @@
 # Partial backend config — passed to terraform init via:
-#   terraform init -backend-config=backend.tf
+#   terraform init -backend-config=backend.hcl
 #
 # This keeps the state key per-environment (separate blast radius).
 # Do NOT use workspaces — each env has its own state file.
