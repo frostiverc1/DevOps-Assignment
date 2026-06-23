@@ -141,7 +141,7 @@ output "alb_url" {
 }
 
 output "github_actions_role_arn" {
-  description = "Set as AWS_OIDC_ROLE_ARN GitHub Actions secret"
+  description = "Set as AWS_ROLE_ARN_DEV GitHub Actions secret"
   value       = module.iam.github_actions_role_arn
 }
 
