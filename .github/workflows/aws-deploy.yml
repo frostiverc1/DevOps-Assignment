@@ -1,0 +1,188 @@
+name: Deploy to AWS (ECS Fargate)
+
+# ── Triggers ───────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "backend/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, staging, prod]
+
+# ── Permissions (OIDC — no static AWS keys) ────────────────────────────────────
+permissions:
+  id-token: write   # Required for OIDC token generation
+  contents: read
+
+# ── Environment matrix ─────────────────────────────────────────────────────────
+env:
+  AWS_REGION: ap-south-1
+  # Resolve environment: use input on dispatch, always 'dev' on push to main
+  TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  deploy:
+    name: Build & Deploy to ECS (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Configure AWS credentials via OIDC ────────────────────────────────
+      # No static access keys. GitHub exchanges the OIDC token for temporary
+      # AWS credentials using the IAM role created by infra/aws/modules/iam/.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+
+      # ── 3. Log in to Amazon ECR ───────────────────────────────────────────────
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 4. Build and push backend image ──────────────────────────────────────
+      - name: Build and push backend image
+        id: build-backend
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${REGISTRY}/devops-assignment-backend:${IMAGE_TAG}"
+          echo "Building backend image: ${IMAGE_URI}"
+          docker build \
+            --tag "${IMAGE_URI}" \
+            --cache-from "${REGISTRY}/devops-assignment-backend:latest" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            ./backend
+          docker push "${IMAGE_URI}"
+          # Also tag as latest for cache purposes
+          docker tag "${IMAGE_URI}" "${REGISTRY}/devops-assignment-backend:latest"
+          docker push "${REGISTRY}/devops-assignment-backend:latest"
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      # ── 5. Build and push frontend image ─────────────────────────────────────
+      - name: Build and push frontend image
+        id: build-frontend
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${REGISTRY}/devops-assignment-frontend:${IMAGE_TAG}"
+          echo "Building frontend image: ${IMAGE_URI}"
+          docker build \
+            --tag "${IMAGE_URI}" \
+            --cache-from "${REGISTRY}/devops-assignment-frontend:latest" \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            ./frontend
+          docker push "${IMAGE_URI}"
+          docker tag "${IMAGE_URI}" "${REGISTRY}/devops-assignment-frontend:latest"
+          docker push "${REGISTRY}/devops-assignment-frontend:latest"
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      # ── 6. Update ECS task definition — backend ───────────────────────────────
+      # ECS task definition versions are immutable. We download the current def,
+      # swap the image URI to the new SHA-tagged image, register a new revision.
+      # Rollback: aws ecs update-service --task-definition <family>:<prev-revision>
+      - name: Download current backend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition devops-assignment-${{ env.TARGET_ENV }}-backend \
+            --query taskDefinition \
+            > /tmp/backend-task-def.json
+
+      - name: Update backend task definition with new image
+        id: update-backend-taskdef
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: /tmp/backend-task-def.json
+          container-name: backend
+          image: ${{ steps.build-backend.outputs.image-uri }}
+
+      - name: Register new backend task definition revision
+        id: register-backend-taskdef
+        run: |
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.update-backend-taskdef.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task-def-arn=${NEW_ARN}" >> $GITHUB_OUTPUT
+          echo "Registered backend task definition: ${NEW_ARN}"
+
+      # ── 7. Update ECS task definition — frontend ──────────────────────────────
+      - name: Download current frontend task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition devops-assignment-${{ env.TARGET_ENV }}-frontend \
+            --query taskDefinition \
+            > /tmp/frontend-task-def.json
+
+      - name: Update frontend task definition with new image
+        id: update-frontend-taskdef
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: /tmp/frontend-task-def.json
+          container-name: frontend
+          image: ${{ steps.build-frontend.outputs.image-uri }}
+
+      - name: Register new frontend task definition revision
+        id: register-frontend-taskdef
+        run: |
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.update-frontend-taskdef.outputs.task-definition }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task-def-arn=${NEW_ARN}" >> $GITHUB_OUTPUT
+          echo "Registered frontend task definition: ${NEW_ARN}"
+
+      # ── 8. Deploy — rolling update ────────────────────────────────────────────
+      # Rolling update: ECS replaces tasks one at a time.
+      # ALB health checks prevent unhealthy tasks from receiving traffic.
+      # Circuit breaker (configured in Terraform) auto-rolls back if new tasks fail.
+      - name: Deploy backend service (rolling update)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.register-backend-taskdef.outputs.task-def-arn }}
+          service: devops-assignment-${{ env.TARGET_ENV }}-backend
+          cluster: devops-assignment-${{ env.TARGET_ENV }}-cluster
+          wait-for-service-stability: true
+
+      - name: Deploy frontend service (rolling update)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.register-frontend-taskdef.outputs.task-def-arn }}
+          service: devops-assignment-${{ env.TARGET_ENV }}-frontend
+          cluster: devops-assignment-${{ env.TARGET_ENV }}-cluster
+          wait-for-service-stability: true
+
+      # ── 9. Summary ────────────────────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "## AWS Deployment Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.TARGET_ENV }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit SHA | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend image | \`${{ steps.build-backend.outputs.image-uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend image | \`${{ steps.build-frontend.outputs.image-uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Rollback command** (if needed):" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "aws ecs update-service --cluster devops-assignment-${{ env.TARGET_ENV }}-cluster \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --service devops-assignment-${{ env.TARGET_ENV }}-backend \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --task-definition devops-assignment-${{ env.TARGET_ENV }}-backend:<PREV_REVISION>" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

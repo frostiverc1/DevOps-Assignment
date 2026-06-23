@@ -1,0 +1,141 @@
+name: Deploy to GCP (Cloud Run)
+
+# ── Triggers ───────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "backend/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, staging, prod]
+
+# ── Permissions (Workload Identity Federation — no JSON keys) ──────────────────
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  GCP_REGION: asia-south1
+  TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  deploy:
+    name: Build & Deploy to Cloud Run (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Authenticate to GCP via Workload Identity Federation ──────────────
+      # GitHub exchanges the OIDC token for a GCP access token.
+      # No JSON key file is ever created or stored.
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ── 3. Set up gcloud CLI ──────────────────────────────────────────────────
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 460.0.0"
+
+      # ── 4. Configure Docker for Artifact Registry ─────────────────────────────
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # ── 5. Set environment-specific project ID ────────────────────────────────
+      - name: Set GCP project ID for environment
+        id: set-project
+        run: |
+          case "${{ env.TARGET_ENV }}" in
+            dev)     echo "project-id=${{ secrets.GCP_PROJECT_ID_DEV }}" >> $GITHUB_OUTPUT ;;
+            staging) echo "project-id=${{ secrets.GCP_PROJECT_ID_STAGING }}" >> $GITHUB_OUTPUT ;;
+            prod)    echo "project-id=${{ secrets.GCP_PROJECT_ID_PROD }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      # ── 6. Build and push backend image ──────────────────────────────────────
+      - name: Build and push backend image
+        id: build-backend
+        env:
+          PROJECT_ID: ${{ steps.set-project.outputs.project-id }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/${PROJECT_ID}/devops-assignment/backend:${IMAGE_TAG}"
+          echo "Building backend: ${IMAGE_URI}"
+          docker build --tag "${IMAGE_URI}" ./backend
+          docker push "${IMAGE_URI}"
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      # ── 7. Build and push frontend image ─────────────────────────────────────
+      - name: Build and push frontend image
+        id: build-frontend
+        env:
+          PROJECT_ID: ${{ steps.set-project.outputs.project-id }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/${PROJECT_ID}/devops-assignment/frontend:${IMAGE_TAG}"
+          echo "Building frontend: ${IMAGE_URI}"
+          docker build --tag "${IMAGE_URI}" ./frontend
+          docker push "${IMAGE_URI}"
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      # ── 8. Deploy backend to Cloud Run ────────────────────────────────────────
+      # Cloud Run automatically creates a new revision on every deploy.
+      # All prior revisions are retained — rollback is traffic shifting:
+      #   gcloud run services update-traffic backend --to-revisions=PREVIOUS=100
+      - name: Deploy backend to Cloud Run
+        id: deploy-backend
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: devops-assignment-${{ env.TARGET_ENV }}-backend
+          region: ${{ env.GCP_REGION }}
+          image: ${{ steps.build-backend.outputs.image-uri }}
+          project_id: ${{ steps.set-project.outputs.project-id }}
+          flags: --ingress=internal
+
+      # ── 9. Deploy frontend to Cloud Run ──────────────────────────────────────
+      - name: Deploy frontend to Cloud Run
+        id: deploy-frontend
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: devops-assignment-${{ env.TARGET_ENV }}-frontend
+          region: ${{ env.GCP_REGION }}
+          image: ${{ steps.build-frontend.outputs.image-uri }}
+          project_id: ${{ steps.set-project.outputs.project-id }}
+          env_vars: |
+            NEXT_PUBLIC_API_URL=${{ steps.deploy-backend.outputs.url }}
+          flags: --ingress=internal-and-cloud-load-balancing
+
+      # ── 10. Summary ───────────────────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "## GCP Deployment Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.TARGET_ENV }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GCP Project | ${{ steps.set-project.outputs.project-id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit SHA | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend URL | ${{ steps.deploy-backend.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend URL | ${{ steps.deploy-frontend.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Rollback command** (Cloud Run traffic shifting — no redeploy needed):" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "gcloud run services update-traffic devops-assignment-${{ env.TARGET_ENV }}-frontend \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --to-revisions=PREVIOUS=100 --region=${{ env.GCP_REGION }} \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --project=${{ steps.set-project.outputs.project-id }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

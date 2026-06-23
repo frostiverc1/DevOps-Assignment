@@ -1,0 +1,135 @@
+name: Terraform — GCP Infrastructure
+
+on:
+  pull_request:
+    paths:
+      - "infra/gcp/**"
+      - ".github/workflows/terraform-gcp.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/gcp/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to plan/apply"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, staging, prod]
+      action:
+        description: "Terraform action"
+        required: true
+        default: "plan"
+        type: choice
+        options: [plan, apply, destroy]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  GCP_REGION: asia-south1
+  TF_VERSION: "1.7.5"
+  TARGET_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event.inputs.action || 'plan' }} — GCP ${{ github.event.inputs.environment || 'dev' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    defaults:
+      run:
+        working-directory: infra/gcp/environments/${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set GCP project for environment
+        id: set-project
+        run: |
+          case "${{ env.TARGET_ENV }}" in
+            dev)     echo "project-id=${{ secrets.GCP_PROJECT_ID_DEV }}" >> $GITHUB_OUTPUT ;;
+            staging) echo "project-id=${{ secrets.GCP_PROJECT_ID_STAGING }}" >> $GITHUB_OUTPUT ;;
+            prod)    echo "project-id=${{ secrets.GCP_PROJECT_ID_PROD }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive ../../..
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init -backend-config=backend.tf \
+            -var="project_id=${{ steps.set-project.outputs.project-id }}" \
+            -var="github_repo=${{ secrets.GITHUB_REPO }}"
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -no-color \
+            -var="project_id=${{ steps.set-project.outputs.project-id }}" \
+            -var="github_repo=${{ secrets.GITHUB_REPO }}" \
+            -out=tfplan 2>&1 | tee /tmp/plan.txt
+        continue-on-error: true
+
+      - name: Post Plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.slice(0, 60000) + '\n\n... (truncated)' : plan;
+            const output = `#### Terraform Plan — GCP \`${{ env.TARGET_ENV }}\`
+            **Format**: \`${{ steps.fmt.outcome }}\` | **Init**: \`${{ steps.init.outcome }}\` | **Validate**: \`${{ steps.validate.outcome }}\` | **Plan**: \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`terraform
+            ${truncated}
+            \`\`\`
+
+            </details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Apply
+        if: |
+          github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          terraform apply -auto-approve \
+            -var="project_id=${{ steps.set-project.outputs.project-id }}" \
+            -var="github_repo=${{ secrets.GITHUB_REPO }}"
+
+      - name: Terraform Destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: |
+          terraform destroy -auto-approve \
+            -var="project_id=${{ steps.set-project.outputs.project-id }}" \
+            -var="github_repo=${{ secrets.GITHUB_REPO }}"
